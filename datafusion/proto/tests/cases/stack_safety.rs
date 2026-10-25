@@ -97,3 +97,42 @@ fn deeply_nested_logical_plan_serialization_uses_a_growable_stack() {
     // exercising the `recursive` stack-growth checkpoint.
     run_in_child(GROWABLE_STACK_TEST_NAME, 2_000);
 }
+
+// Logical plan deserialization (#26737): `try_into_logical_plan` recurses once
+// per plan level, so a deeply nested plan needs the same stack-growth
+// checkpoint as serialization.
+#[cfg(feature = "recursive_protection")]
+mod logical_deserialization {
+    use datafusion::prelude::SessionContext;
+    use datafusion_proto::logical_plan::{AsLogicalPlan, DefaultLogicalExtensionCodec};
+    use datafusion_proto::protobuf::LogicalPlanNode;
+
+    use super::deeply_aliased_plan;
+
+    #[test]
+    fn deeply_nested_logical_plan_deserialization_uses_a_growable_stack() {
+        let codec = DefaultLogicalExtensionCodec {};
+        // Build the protobuf representation directly: `prost` decoding
+        // enforces its own recursion limit, but callers can construct (or
+        // deserialize from JSON) arbitrarily deep `LogicalPlanNode`s.
+        let proto =
+            LogicalPlanNode::try_from_logical_plan(&deeply_aliased_plan(2_000), &codec)
+                .unwrap();
+
+        std::thread::Builder::new()
+            .name("two-megabyte-stack".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let ctx = SessionContext::new();
+                proto
+                    .try_into_logical_plan(
+                        &ctx.task_ctx(),
+                        &DefaultLogicalExtensionCodec {},
+                    )
+                    .unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
